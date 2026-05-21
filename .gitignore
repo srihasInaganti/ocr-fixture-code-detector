@@ -1,0 +1,13 @@
+# Claude-facing project brief — keep local only.
+CLAUDE.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env files (per-folder .gitignores also cover these)
+.env
+.env.local
+.env.*.local
