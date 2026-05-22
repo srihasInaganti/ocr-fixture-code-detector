@@ -3,6 +3,7 @@
 Single file for now; split into a package if/when a third provider lands.
 """
 
+import io
 import os
 import struct
 from abc import ABC, abstractmethod
@@ -66,11 +67,17 @@ class StubProvider(OcrProvider):
         return out
 
 
-class DocumentAiProvider(OcrProvider):
-    """Google Document AI OCR processor — whole-image processing.
+# Tiling: ~letter-page sized tile, small overlap so text on a tile boundary
+# is fully visible in at least one tile. Dedup buckets the box center to
+# this many pixels so the same token from two overlapping tiles collapses.
+_TILE_SIZE = 1500
+_TILE_OVERLAP = 200
+_DEDUP_BUCKET = 30
 
-    Tiling for small fixture tags lives in Chunk 4.5; this is the baseline.
-    """
+
+class DocumentAiProvider(OcrProvider):
+    """Google Document AI OCR. Tiles large images so small fixture tags
+    don't get downsampled away on big drawings."""
 
     def __init__(self) -> None:
         project_id = os.getenv("GCP_PROJECT_ID")
@@ -118,6 +125,41 @@ class DocumentAiProvider(OcrProvider):
                 "Could not parse PNG dimensions; provider expects a PNG input"
             )
 
+        if width <= _TILE_SIZE and height <= _TILE_SIZE:
+            return self._detect_image(image_bytes, offset_x=0, offset_y=0)
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(image_bytes))
+        x_starts = _tile_starts(width, _TILE_SIZE, _TILE_OVERLAP)
+        y_starts = _tile_starts(height, _TILE_SIZE, _TILE_OVERLAP)
+
+        seen: set[tuple[str, int, int]] = set()
+        out: list[Detection] = []
+        for ty in y_starts:
+            for tx in x_starts:
+                tw = min(_TILE_SIZE, width - tx)
+                th = min(_TILE_SIZE, height - ty)
+                tile_img = img.crop((tx, ty, tx + tw, ty + th))
+                buf = io.BytesIO()
+                tile_img.save(buf, format="PNG")
+                for det in self._detect_image(
+                    buf.getvalue(), offset_x=tx, offset_y=ty
+                ):
+                    cx = round((det.bbox[0] + det.bbox[2] / 2) / _DEDUP_BUCKET)
+                    cy = round((det.bbox[1] + det.bbox[3] / 2) / _DEDUP_BUCKET)
+                    key = (det.text, cx, cy)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(det)
+        return out
+
+    def _detect_image(
+        self, image_bytes: bytes, *, offset_x: int, offset_y: int
+    ) -> list[Detection]:
+        """OCR one image; translate every bbox by (offset_x, offset_y)."""
+        width, height = _png_size(image_bytes)
         raw_doc = self._documentai.RawDocument(
             content=image_bytes, mime_type="image/png"
         )
@@ -139,9 +181,10 @@ class DocumentAiProvider(OcrProvider):
                 )
                 if bbox is None:
                     continue
+                shifted = [bbox[0] + offset_x, bbox[1] + offset_y, bbox[2], bbox[3]]
                 confidence = float(token.layout.confidence or 1.0)
                 detections.append(
-                    Detection(text=text, bbox=bbox, confidence=confidence)
+                    Detection(text=text, bbox=shifted, confidence=confidence)
                 )
         return detections
 
@@ -169,6 +212,19 @@ def _normalized_poly_to_pixel_bbox(
     x_min, x_max = min(xs), max(xs)
     y_min, y_max = min(ys), max(ys)
     return [x_min, y_min, x_max - x_min, y_max - y_min]
+
+
+def _tile_starts(length: int, tile_size: int, overlap: int) -> list[int]:
+    if length <= tile_size:
+        return [0]
+    step = tile_size - overlap
+    starts: list[int] = []
+    pos = 0
+    while pos + tile_size < length:
+        starts.append(pos)
+        pos += step
+    starts.append(length - tile_size)
+    return starts
 
 
 _provider_cache: dict[str, OcrProvider] = {}

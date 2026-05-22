@@ -35,7 +35,7 @@ DEFAULT_PAGE_INDEX = int(os.getenv("DEFAULT_PAGE_INDEX", "0"))
 DEFAULT_RENDER_DPI = int(os.getenv("DEFAULT_RENDER_DPI", "150"))
 MAX_RENDER_DPI = int(os.getenv("MAX_RENDER_DPI", "300"))
 
-LF_CODE = re.compile(r"^LF(\d{1,2}|7-X)$")
+LF_CODE = re.compile(r"^LF(\d{1,2}|7-\d)$")
 
 
 @app.get("/health")
