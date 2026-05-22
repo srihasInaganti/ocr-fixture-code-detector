@@ -11,3 +11,9 @@ CLAUDE.md
 .env
 .env.local
 .env.*.local
+
+# Credentials — never commit
+secrets/
+*.json.key
+*-sa.json
+service-account*.json

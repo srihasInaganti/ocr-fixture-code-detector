@@ -1,7 +1,6 @@
-"""OCR provider interface and stub implementation.
+"""OCR provider interface and implementations.
 
-A single file for now; split into a package when the second real provider lands
-in Chunk 4.
+Single file for now; split into a package if/when a third provider lands.
 """
 
 import os
@@ -21,6 +20,10 @@ class OcrProvider(ABC):
     @abstractmethod
     def detect(self, image_bytes: bytes) -> list[Detection]:
         ...
+
+
+class OcrConfigurationError(RuntimeError):
+    """Raised when a provider is selected but its configuration is incomplete."""
 
 
 def _png_size(data: bytes) -> tuple[int, int]:
@@ -63,8 +66,124 @@ class StubProvider(OcrProvider):
         return out
 
 
+class DocumentAiProvider(OcrProvider):
+    """Google Document AI OCR processor — whole-image processing.
+
+    Tiling for small fixture tags lives in Chunk 4.5; this is the baseline.
+    """
+
+    def __init__(self) -> None:
+        project_id = os.getenv("GCP_PROJECT_ID")
+        location = os.getenv("GCP_LOCATION")
+        processor_id = os.getenv("DOCAI_PROCESSOR_ID")
+        creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+        missing = [
+            name
+            for name, val in [
+                ("GCP_PROJECT_ID", project_id),
+                ("GCP_LOCATION", location),
+                ("DOCAI_PROCESSOR_ID", processor_id),
+                ("GOOGLE_APPLICATION_CREDENTIALS", creds_path),
+            ]
+            if not val
+        ]
+        if missing:
+            raise OcrConfigurationError(
+                "Document AI requires env vars: " + ", ".join(missing)
+            )
+
+        try:
+            from google.api_core.client_options import ClientOptions
+            from google.cloud import documentai_v1 as documentai
+        except ImportError as exc:
+            raise OcrConfigurationError(
+                "google-cloud-documentai is not installed (check requirements.txt)"
+            ) from exc
+
+        self._documentai = documentai
+        self._client = documentai.DocumentProcessorServiceClient(
+            client_options=ClientOptions(
+                api_endpoint=f"{location}-documentai.googleapis.com"
+            )
+        )
+        self._processor_name = self._client.processor_path(
+            project_id, location, processor_id  # type: ignore[arg-type]
+        )
+
+    def detect(self, image_bytes: bytes) -> list[Detection]:
+        width, height = _png_size(image_bytes)
+        if width == 0 or height == 0:
+            raise OcrConfigurationError(
+                "Could not parse PNG dimensions; provider expects a PNG input"
+            )
+
+        raw_doc = self._documentai.RawDocument(
+            content=image_bytes, mime_type="image/png"
+        )
+        request = self._documentai.ProcessRequest(
+            name=self._processor_name, raw_document=raw_doc
+        )
+        result = self._client.process_document(request=request)
+        document = result.document
+        full_text = document.text or ""
+
+        detections: list[Detection] = []
+        for page in document.pages:
+            for token in page.tokens:
+                text = _extract_layout_text(token.layout, full_text)
+                if not text:
+                    continue
+                bbox = _normalized_poly_to_pixel_bbox(
+                    token.layout.bounding_poly, width, height
+                )
+                if bbox is None:
+                    continue
+                confidence = float(token.layout.confidence or 1.0)
+                detections.append(
+                    Detection(text=text, bbox=bbox, confidence=confidence)
+                )
+        return detections
+
+
+def _extract_layout_text(layout, full_text: str) -> str:
+    anchor = getattr(layout, "text_anchor", None)
+    if anchor is None or not anchor.text_segments:
+        return ""
+    parts: list[str] = []
+    for seg in anchor.text_segments:
+        start = int(seg.start_index) if seg.start_index else 0
+        end = int(seg.end_index) if seg.end_index else len(full_text)
+        parts.append(full_text[start:end])
+    return "".join(parts).strip()
+
+
+def _normalized_poly_to_pixel_bbox(
+    bounding_poly, width: int, height: int
+) -> list[float] | None:
+    verts = list(bounding_poly.normalized_vertices)
+    if not verts:
+        return None
+    xs = [float(v.x) * width for v in verts]
+    ys = [float(v.y) * height for v in verts]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    return [x_min, y_min, x_max - x_min, y_max - y_min]
+
+
+_provider_cache: dict[str, OcrProvider] = {}
+
+
 def get_provider() -> OcrProvider:
     name = os.getenv("OCR_PROVIDER", "stub").lower()
+    cached = _provider_cache.get(name)
+    if cached is not None:
+        return cached
     if name == "stub":
-        return StubProvider()
-    raise ValueError(f"Unknown OCR provider: {name!r}")
+        provider: OcrProvider = StubProvider()
+    elif name == "documentai":
+        provider = DocumentAiProvider()
+    else:
+        raise OcrConfigurationError(f"Unknown OCR provider: {name!r}")
+    _provider_cache[name] = provider
+    return provider

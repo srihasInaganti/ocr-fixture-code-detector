@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from ocr import get_provider
+from ocr import OcrConfigurationError, get_provider
 
 app = FastAPI(title="OCR Fixture Code Detector")
 
@@ -120,8 +120,11 @@ async def detect(
     data = await file.read()
     png, width, height, page_count = _render_page(data, page, dpi)
 
-    provider = get_provider()
-    raw = provider.detect(png)
+    try:
+        provider = get_provider()
+        raw = provider.detect(png)
+    except OcrConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=f"OCR misconfigured: {exc}")
 
     filtered = [d for d in raw if LF_CODE.match(d.text)]
 
