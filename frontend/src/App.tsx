@@ -1,21 +1,30 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+type Detection = {
+  id: string;
+  text: string;
+  bbox: [number, number, number, number];
+  confidence: number;
+};
 
 type HealthState =
   | { kind: "loading" }
   | { kind: "ok" }
   | { kind: "error"; message: string };
 
-type RenderState =
+type DetectState =
   | { kind: "idle" }
   | { kind: "uploading"; fileName: string }
   | {
-      kind: "rendered";
+      kind: "detected";
       fileName: string;
       imageUrl: string;
       width: number;
       height: number;
       page: number;
       pageCount: number;
+      detections: Detection[];
+      counts: Record<string, number>;
     }
   | { kind: "error"; message: string };
 
@@ -23,17 +32,15 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
 export default function App() {
   const [health, setHealth] = useState<HealthState>({ kind: "loading" });
-  const [render, setRender] = useState<RenderState>({ kind: "idle" });
+  const [state, setState] = useState<DetectState>({ kind: "idle" });
   const [page, setPage] = useState(0);
   const [dragOver, setDragOver] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!API_BASE_URL) {
-      setHealth({
-        kind: "error",
-        message: "VITE_API_BASE_URL is not set.",
-      });
+      setHealth({ kind: "error", message: "VITE_API_BASE_URL is not set." });
       return;
     }
     const controller = new AbortController();
@@ -53,20 +60,15 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  useEffect(() => {
-    if (render.kind !== "rendered") return;
-    const url = render.imageUrl;
-    return () => URL.revokeObjectURL(url);
-  }, [render.kind === "rendered" ? render.imageUrl : null]);
-
   async function uploadFile(file: File) {
     if (!API_BASE_URL) return;
-    setRender({ kind: "uploading", fileName: file.name });
+    setState({ kind: "uploading", fileName: file.name });
+    setSelectedId(null);
     try {
       const form = new FormData();
       form.append("file", file);
       form.append("page", String(page));
-      const res = await fetch(`${API_BASE_URL}/render`, {
+      const res = await fetch(`${API_BASE_URL}/detect`, {
         method: "POST",
         body: form,
       });
@@ -74,23 +76,20 @@ export default function App() {
         const text = await res.text();
         throw new Error(`HTTP ${res.status}: ${text}`);
       }
-      const width = Number(res.headers.get("X-Image-Width"));
-      const height = Number(res.headers.get("X-Image-Height"));
-      const pageIdx = Number(res.headers.get("X-Page-Index") ?? "0");
-      const pageCount = Number(res.headers.get("X-Page-Count") ?? "1");
-      const blob = await res.blob();
-      const imageUrl = URL.createObjectURL(blob);
-      setRender({
-        kind: "rendered",
+      const data = await res.json();
+      setState({
+        kind: "detected",
         fileName: file.name,
-        imageUrl,
-        width,
-        height,
-        page: pageIdx,
-        pageCount,
+        imageUrl: `data:${data.imageMime};base64,${data.image}`,
+        width: data.width,
+        height: data.height,
+        page: data.page,
+        pageCount: data.pageCount,
+        detections: data.detections,
+        counts: data.counts,
       });
     } catch (err) {
-      setRender({
+      setState({
         kind: "error",
         message: err instanceof Error ? err.message : String(err),
       });
@@ -101,7 +100,7 @@ export default function App() {
     if (!files || files.length === 0) return;
     const file = files[0];
     if (file.type && file.type !== "application/pdf") {
-      setRender({ kind: "error", message: `Expected a PDF, got ${file.type}` });
+      setState({ kind: "error", message: `Expected a PDF, got ${file.type}` });
       return;
     }
     void uploadFile(file);
@@ -111,7 +110,7 @@ export default function App() {
     <main
       style={{
         fontFamily: "system-ui, sans-serif",
-        maxWidth: 1100,
+        maxWidth: 1400,
         margin: "2rem auto",
         padding: "0 1rem",
       }}
@@ -137,7 +136,7 @@ export default function App() {
           style={{
             border: `2px dashed ${dragOver ? "#2a6df4" : "#bbb"}`,
             background: dragOver ? "#eef3ff" : "#fafafa",
-            padding: "2rem",
+            padding: "1.25rem",
             borderRadius: 8,
             textAlign: "center",
             cursor: "pointer",
@@ -153,13 +152,7 @@ export default function App() {
             style={{ display: "none" }}
             onChange={(e) => pickFile(e.target.files)}
           />
-          <div
-            style={{
-              marginTop: "0.75rem",
-              fontSize: 14,
-              color: "#555",
-            }}
-          >
+          <div style={{ marginTop: "0.5rem", fontSize: 14, color: "#555" }}>
             <label>
               Page (0-indexed):{" "}
               <input
@@ -176,7 +169,17 @@ export default function App() {
       </section>
 
       <section style={{ marginTop: "1.5rem" }}>
-        <RenderView state={render} />
+        {state.kind === "uploading" && <p>Detecting {state.fileName}…</p>}
+        {state.kind === "error" && (
+          <p style={{ color: "crimson" }}>Error: {state.message}</p>
+        )}
+        {state.kind === "detected" && (
+          <DetectionLayout
+            state={state}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
+        )}
       </section>
     </main>
   );
@@ -210,40 +213,286 @@ function HealthBadge({ state }: { state: HealthState }) {
   );
 }
 
-function RenderView({ state }: { state: RenderState }) {
-  if (state.kind === "idle") return null;
-  if (state.kind === "uploading")
-    return <p>Rendering {state.fileName}…</p>;
-  if (state.kind === "error")
-    return <p style={{ color: "crimson" }}>Error: {state.message}</p>;
+function DetectionLayout({
+  state,
+  selectedId,
+  onSelect,
+}: {
+  state: Extract<DetectState, { kind: "detected" }>;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) 300px",
+        gap: "1.5rem",
+      }}
+    >
+      <ImageWithOverlay
+        imageUrl={state.imageUrl}
+        width={state.width}
+        height={state.height}
+        page={state.page}
+        pageCount={state.pageCount}
+        fileName={state.fileName}
+        detections={state.detections}
+        selectedId={selectedId}
+        onSelect={onSelect}
+      />
+      <SidePanel
+        detections={state.detections}
+        counts={state.counts}
+        selectedId={selectedId}
+        onSelect={onSelect}
+      />
+    </div>
+  );
+}
 
+function ImageWithOverlay({
+  imageUrl,
+  width,
+  height,
+  fileName,
+  page,
+  pageCount,
+  detections,
+  selectedId,
+  onSelect,
+}: {
+  imageUrl: string;
+  width: number;
+  height: number;
+  fileName: string;
+  page: number;
+  pageCount: number;
+  detections: Detection[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
   return (
     <div>
       <p style={{ fontSize: 14, color: "#555", margin: "0 0 0.5rem" }}>
-        <code>{state.fileName}</code> — page {state.page + 1} of{" "}
-        {state.pageCount} — natural {state.width}×{state.height} px
+        <code>{fileName}</code> — page {page + 1} of {pageCount} — {width}×
+        {height} px
       </p>
       <div
         style={{
+          position: "relative",
+          display: "inline-block",
+          maxWidth: "100%",
           border: "1px solid #ddd",
           borderRadius: 6,
-          overflow: "auto",
-          maxHeight: "80vh",
+          overflow: "hidden",
           background: "#fff",
         }}
       >
         <img
-          src={state.imageUrl}
-          alt={`PDF page ${state.page + 1}`}
-          width={state.width}
-          height={state.height}
-          style={{
-            display: "block",
-            maxWidth: "100%",
-            height: "auto",
-          }}
+          src={imageUrl}
+          alt={`PDF page ${page + 1}`}
+          width={width}
+          height={height}
+          style={{ display: "block", maxWidth: "100%", height: "auto" }}
         />
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          preserveAspectRatio="xMinYMin meet"
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            pointerEvents: "none",
+          }}
+        >
+          {detections.map((d) => (
+            <DetectionBox
+              key={d.id}
+              det={d}
+              selected={selectedId === d.id}
+              onClick={() => onSelect(d.id)}
+            />
+          ))}
+        </svg>
       </div>
     </div>
   );
+}
+
+function DetectionBox({
+  det,
+  selected,
+  onClick,
+}: {
+  det: Detection;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const [x, y, w, h] = det.bbox;
+  const stroke = selected ? "#ff8c00" : "#16a34a";
+  const fill = selected ? "rgba(255,140,0,0.22)" : "rgba(22,163,74,0.15)";
+  const fontSize = Math.max(12, h * 0.7);
+  return (
+    <g
+      style={{ pointerEvents: "all", cursor: "pointer" }}
+      onClick={onClick}
+      data-detection-id={det.id}
+    >
+      <rect
+        x={x}
+        y={y}
+        width={w}
+        height={h}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={2}
+        vectorEffect="non-scaling-stroke"
+      />
+      <text
+        x={x}
+        y={y - 4}
+        fill={stroke}
+        fontSize={fontSize}
+        style={{ fontFamily: "system-ui, sans-serif", fontWeight: 600 }}
+      >
+        {det.text}
+      </text>
+    </g>
+  );
+}
+
+function SidePanel({
+  detections,
+  counts,
+  selectedId,
+  onSelect,
+}: {
+  detections: Detection[];
+  counts: Record<string, number>;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const codes = useMemo(
+    () => Object.keys(counts).sort(lfCodeCompare),
+    [counts],
+  );
+  const byCode = useMemo(() => {
+    const m = new Map<string, Detection[]>();
+    for (const d of detections) {
+      const list = m.get(d.text) ?? [];
+      list.push(d);
+      m.set(d.text, list);
+    }
+    return m;
+  }, [detections]);
+
+  return (
+    <aside
+      style={{
+        border: "1px solid #ddd",
+        borderRadius: 6,
+        padding: "0.75rem 1rem",
+        background: "#fff",
+        position: "sticky",
+        top: "1rem",
+        alignSelf: "start",
+        maxHeight: "calc(100vh - 2rem)",
+        overflowY: "auto",
+      }}
+    >
+      <h2 style={{ fontSize: 16, margin: "0 0 0.25rem" }}>Detected codes</h2>
+      <p style={{ fontSize: 13, color: "#555", margin: "0 0 0.75rem" }}>
+        {detections.length} total
+      </p>
+      {codes.length === 0 ? (
+        <p style={{ fontSize: 13, color: "#777" }}>No LF codes detected.</p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          {codes.map((code) => (
+            <CodeGroup
+              key={code}
+              code={code}
+              count={counts[code]}
+              detections={byCode.get(code) ?? []}
+              selectedId={selectedId}
+              onSelect={onSelect}
+            />
+          ))}
+        </ul>
+      )}
+    </aside>
+  );
+}
+
+function CodeGroup({
+  code,
+  count,
+  detections,
+  selectedId,
+  onSelect,
+}: {
+  code: string;
+  count: number;
+  detections: Detection[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <li style={{ marginBottom: "0.75rem" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          fontWeight: 600,
+          fontSize: 14,
+        }}
+      >
+        <span>{code}</span>
+        <span style={{ color: "#555" }}>{count}</span>
+      </div>
+      <ul
+        style={{
+          listStyle: "none",
+          padding: "0.25rem 0 0 0.5rem",
+          margin: 0,
+        }}
+      >
+        {detections.map((d) => (
+          <li key={d.id}>
+            <button
+              type="button"
+              onClick={() => onSelect(d.id)}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                background:
+                  selectedId === d.id ? "#fff3e0" : "transparent",
+                border: `1px solid ${selectedId === d.id ? "#ff8c00" : "transparent"}`,
+                padding: "2px 6px",
+                borderRadius: 4,
+                cursor: "pointer",
+                fontSize: 12,
+                color: "#444",
+                fontFamily: "inherit",
+              }}
+            >
+              {d.id} · {(d.confidence * 100).toFixed(0)}%
+            </button>
+          </li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+function lfCodeCompare(a: string, b: string): number {
+  const parse = (s: string): number => {
+    const m = /^LF(\d{1,2}|7-X)$/.exec(s);
+    if (!m) return Number.POSITIVE_INFINITY;
+    return m[1] === "7-X" ? 7.5 : Number(m[1]);
+  };
+  return parse(a) - parse(b);
 }
