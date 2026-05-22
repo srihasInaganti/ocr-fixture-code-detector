@@ -25,8 +25,10 @@ app.add_middleware(
 )
 
 DEFAULT_PAGE_INDEX = int(os.getenv("DEFAULT_PAGE_INDEX", "0"))
-DEFAULT_RENDER_DPI = int(os.getenv("DEFAULT_RENDER_DPI", "300"))
-MAX_RENDER_DPI = int(os.getenv("MAX_RENDER_DPI", "600"))
+# Defaults are tuned for Render's free tier (512 MB). 300+ DPI on a 24x36"
+# drawing will OOM the process. Override via env if you upgrade the plan.
+DEFAULT_RENDER_DPI = int(os.getenv("DEFAULT_RENDER_DPI", "150"))
+MAX_RENDER_DPI = int(os.getenv("MAX_RENDER_DPI", "300"))
 
 
 @app.get("/health")
