@@ -45,8 +45,9 @@ type DetectState =
       page: number;
       pageCount: number;
       detections: Detection[];
-    }
-  | { kind: "error"; message: string };
+    };
+
+type AppError = { message: string; retry?: () => void };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
@@ -59,6 +60,7 @@ export default function App() {
   const [rotation, setRotation] = useState(0);
   const [hiddenCodes, setHiddenCodes] = useState<Set<string>>(new Set());
   const [drawMode, setDrawMode] = useState(false);
+  const [error, setError] = useState<AppError | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const newBoxSeq = useRef(0);
 
@@ -86,10 +88,12 @@ export default function App() {
 
   async function renderPage(file: File, page: number, rot: number) {
     if (!API_BASE_URL) return;
+    const prior = state;
     setState({ kind: "rendering", file, fileName: file.name, page });
     setSelectedId(null);
     setDrawMode(false);
     setPageInput(String(page + 1));
+    setError(null);
     try {
       const form = new FormData();
       form.append("file", file);
@@ -119,15 +123,19 @@ export default function App() {
         height,
       });
     } catch (err) {
-      setState({
-        kind: "error",
+      setState(prior);
+      setError({
         message: err instanceof Error ? err.message : String(err),
+        retry: () => {
+          void renderPage(file, page, rot);
+        },
       });
     }
   }
 
   async function runDetect() {
     if (state.kind !== "preview" && state.kind !== "detected") return;
+    const prior = state;
     const { file, fileName, page, pageCount, imageUrl, width, height } = state;
     setState({
       kind: "detecting",
@@ -142,6 +150,7 @@ export default function App() {
     setSelectedId(null);
     setDrawMode(false);
     setHiddenCodes(new Set());
+    setError(null);
     try {
       const form = new FormData();
       form.append("file", file);
@@ -168,9 +177,12 @@ export default function App() {
         detections: data.detections,
       });
     } catch (err) {
-      setState({
-        kind: "error",
+      setState(prior);
+      setError({
         message: err instanceof Error ? err.message : String(err),
+        retry: () => {
+          void runDetect();
+        },
       });
     }
   }
@@ -194,7 +206,7 @@ export default function App() {
     if (!files || files.length === 0) return;
     const file = files[0];
     if (file.type && file.type !== "application/pdf") {
-      setState({ kind: "error", message: `Expected a PDF, got ${file.type}` });
+      setError({ message: `Expected a PDF, got ${file.type}` });
       return;
     }
     void renderPage(file, 0, rotation);
@@ -272,6 +284,46 @@ export default function App() {
     });
   }
 
+  function exportJson() {
+    if (state.kind !== "detected") return;
+    const payload = {
+      fileName: state.fileName,
+      page: state.page,
+      pageCount: state.pageCount,
+      width: state.width,
+      height: state.height,
+      detections: state.detections,
+    };
+    downloadFile(
+      JSON.stringify(payload, null, 2),
+      `${baseName(state.fileName)}-page${state.page + 1}.json`,
+      "application/json",
+    );
+  }
+
+  function exportCsv() {
+    if (state.kind !== "detected") return;
+    const lines = ["id,text,x,y,width,height,confidence"];
+    for (const d of state.detections) {
+      lines.push(
+        [
+          csvCell(d.id),
+          csvCell(d.text),
+          d.bbox[0].toFixed(2),
+          d.bbox[1].toFixed(2),
+          d.bbox[2].toFixed(2),
+          d.bbox[3].toFixed(2),
+          d.confidence.toFixed(4),
+        ].join(","),
+      );
+    }
+    downloadFile(
+      lines.join("\n"),
+      `${baseName(state.fileName)}-page${state.page + 1}.csv`,
+      "text/csv",
+    );
+  }
+
   const showToolbar =
     state.kind === "rendering" ||
     state.kind === "preview" ||
@@ -326,6 +378,12 @@ export default function App() {
           />
         </div>
       </section>
+
+      {error && (
+        <section style={{ marginTop: "1rem" }}>
+          <ErrorBanner error={error} onDismiss={() => setError(null)} />
+        </section>
+      )}
 
       {showToolbar && (
         <section style={{ marginTop: "1rem" }}>
@@ -388,10 +446,9 @@ export default function App() {
             onAddBox={addBox}
             onDeleteBox={deleteBox}
             onRelabelBox={relabelBox}
+            onExportJson={exportJson}
+            onExportCsv={exportCsv}
           />
-        )}
-        {state.kind === "error" && (
-          <p style={{ color: "crimson" }}>Error: {state.message}</p>
         )}
       </section>
     </main>
@@ -556,6 +613,8 @@ function DetectionLayout({
   onAddBox,
   onDeleteBox,
   onRelabelBox,
+  onExportJson,
+  onExportCsv,
 }: {
   state: Extract<DetectState, { kind: "detected" }>;
   selectedId: string | null;
@@ -568,6 +627,8 @@ function DetectionLayout({
   onAddBox: (bbox: [number, number, number, number]) => void;
   onDeleteBox: (id: string) => void;
   onRelabelBox: (id: string) => void;
+  onExportJson: () => void;
+  onExportCsv: () => void;
 }) {
   return (
     <div
@@ -603,6 +664,8 @@ function DetectionLayout({
         onToggleCodeVisibility={onToggleCodeVisibility}
         onDeleteBox={onDeleteBox}
         onRelabelBox={onRelabelBox}
+        onExportJson={onExportJson}
+        onExportCsv={onExportCsv}
       />
     </div>
   );
@@ -943,6 +1006,8 @@ function SidePanel({
   onToggleCodeVisibility,
   onDeleteBox,
   onRelabelBox,
+  onExportJson,
+  onExportCsv,
 }: {
   detections: Detection[];
   selectedId: string | null;
@@ -953,6 +1018,8 @@ function SidePanel({
   onToggleCodeVisibility: (code: string) => void;
   onDeleteBox: (id: string) => void;
   onRelabelBox: (id: string) => void;
+  onExportJson: () => void;
+  onExportCsv: () => void;
 }) {
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -1013,15 +1080,40 @@ function SidePanel({
           {drawMode ? "Cancel" : "+ Draw box"}
         </button>
       </div>
-      <p style={{ fontSize: 13, color: "#555", margin: "0 0 0.75rem" }}>
-        {detections.length} total
-        {drawMode && (
-          <span style={{ color: "#2a6df4" }}>
-            {" "}
-            · click-drag on image to add
-          </span>
-        )}
-      </p>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: "0.75rem",
+        }}
+      >
+        <span style={{ fontSize: 13, color: "#555", flex: 1 }}>
+          {detections.length} total
+          {drawMode && (
+            <span style={{ color: "#2a6df4" }}>
+              {" "}
+              · click-drag on image
+            </span>
+          )}
+        </span>
+        <button
+          type="button"
+          onClick={onExportJson}
+          disabled={detections.length === 0}
+          style={{ fontSize: 12, padding: "2px 6px" }}
+        >
+          JSON
+        </button>
+        <button
+          type="button"
+          onClick={onExportCsv}
+          disabled={detections.length === 0}
+          style={{ fontSize: 12, padding: "2px 6px" }}
+        >
+          CSV
+        </button>
+      </div>
       {codes.length === 0 ? (
         <p style={{ fontSize: 13, color: "#777" }}>No LF codes detected.</p>
       ) : (
@@ -1181,4 +1273,62 @@ function lfCodeCompare(a: string, b: string): number {
     return base + sub;
   };
   return parse(a) - parse(b);
+}
+
+function ErrorBanner({
+  error,
+  onDismiss,
+}: {
+  error: AppError;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.75rem",
+        padding: "0.5rem 0.75rem",
+        background: "#fef3f2",
+        border: "1px solid #fecdca",
+        borderRadius: 6,
+      }}
+    >
+      <span style={{ color: "#b42318", fontSize: 14, flex: 1 }}>
+        ⚠ {error.message}
+      </span>
+      {error.retry && (
+        <button
+          type="button"
+          onClick={() => {
+            onDismiss();
+            error.retry!();
+          }}
+        >
+          Try again
+        </button>
+      )}
+      <button type="button" onClick={onDismiss}>
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
+function downloadFile(content: string, filename: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function baseName(fileName: string): string {
+  return fileName.replace(/\.pdf$/i, "");
+}
+
+function csvCell(s: string): string {
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
