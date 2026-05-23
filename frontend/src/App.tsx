@@ -45,7 +45,6 @@ type DetectState =
       page: number;
       pageCount: number;
       detections: Detection[];
-      counts: Record<string, number>;
     }
   | { kind: "error"; message: string };
 
@@ -58,7 +57,10 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pageInput, setPageInput] = useState("1");
   const [rotation, setRotation] = useState(0);
+  const [hiddenCodes, setHiddenCodes] = useState<Set<string>>(new Set());
+  const [drawMode, setDrawMode] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const newBoxSeq = useRef(0);
 
   useEffect(() => {
     if (!API_BASE_URL) {
@@ -86,6 +88,7 @@ export default function App() {
     if (!API_BASE_URL) return;
     setState({ kind: "rendering", file, fileName: file.name, page });
     setSelectedId(null);
+    setDrawMode(false);
     setPageInput(String(page + 1));
     try {
       const form = new FormData();
@@ -137,6 +140,8 @@ export default function App() {
       height,
     });
     setSelectedId(null);
+    setDrawMode(false);
+    setHiddenCodes(new Set());
     try {
       const form = new FormData();
       form.append("file", file);
@@ -161,7 +166,6 @@ export default function App() {
         page: data.page,
         pageCount: data.pageCount,
         detections: data.detections,
-        counts: data.counts,
       });
     } catch (err) {
       setState({
@@ -194,6 +198,78 @@ export default function App() {
       return;
     }
     void renderPage(file, 0, rotation);
+  }
+
+  function updateBox(id: string, bbox: [number, number, number, number]) {
+    setState((s) =>
+      s.kind === "detected"
+        ? {
+            ...s,
+            detections: s.detections.map((d) =>
+              d.id === id ? { ...d, bbox } : d,
+            ),
+          }
+        : s,
+    );
+  }
+
+  function deleteBox(id: string) {
+    setState((s) =>
+      s.kind === "detected"
+        ? { ...s, detections: s.detections.filter((d) => d.id !== id) }
+        : s,
+    );
+    if (selectedId === id) setSelectedId(null);
+  }
+
+  function relabelBox(id: string) {
+    if (state.kind !== "detected") return;
+    const current = state.detections.find((d) => d.id === id);
+    if (!current) return;
+    const next = window.prompt("New label:", current.text);
+    if (next == null) return;
+    const trimmed = next.trim();
+    if (!trimmed) return;
+    setState((s) =>
+      s.kind === "detected"
+        ? {
+            ...s,
+            detections: s.detections.map((d) =>
+              d.id === id ? { ...d, text: trimmed } : d,
+            ),
+          }
+        : s,
+    );
+  }
+
+  function addBox(bbox: [number, number, number, number]) {
+    const label = window.prompt("Code label for new box:", "");
+    setDrawMode(false);
+    if (label == null) return;
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    const id = `new-${++newBoxSeq.current}`;
+    setState((s) =>
+      s.kind === "detected"
+        ? {
+            ...s,
+            detections: [
+              ...s.detections,
+              { id, text: trimmed, bbox, confidence: 1.0 },
+            ],
+          }
+        : s,
+    );
+    setSelectedId(id);
+  }
+
+  function toggleCodeVisibility(code: string) {
+    setHiddenCodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
   }
 
   const showToolbar =
@@ -272,10 +348,14 @@ export default function App() {
 
       <section style={{ marginTop: "1.5rem" }}>
         {state.kind === "rendering" && (
-          <p>Rendering {state.fileName}, page {state.page + 1}…</p>
+          <p>
+            Rendering {state.fileName}, page {state.page + 1}…
+          </p>
         )}
         {state.kind === "detecting" && (
-          <p>Running OCR on {state.fileName}, page {state.page + 1}…</p>
+          <p>
+            Running OCR on {state.fileName}, page {state.page + 1}…
+          </p>
         )}
         {state.kind === "preview" && (
           <ImageWithOverlay
@@ -287,14 +367,27 @@ export default function App() {
             fileName={state.fileName}
             detections={[]}
             selectedId={null}
+            hiddenCodes={new Set()}
+            drawMode={false}
+            editable={false}
             onSelect={() => {}}
+            onMoveBox={() => {}}
+            onAddBox={() => {}}
           />
         )}
         {state.kind === "detected" && (
           <DetectionLayout
             state={state}
             selectedId={selectedId}
+            hiddenCodes={hiddenCodes}
+            drawMode={drawMode}
             onSelect={setSelectedId}
+            onToggleDrawMode={() => setDrawMode((m) => !m)}
+            onToggleCodeVisibility={toggleCodeVisibility}
+            onMoveBox={updateBox}
+            onAddBox={addBox}
+            onDeleteBox={deleteBox}
+            onRelabelBox={relabelBox}
           />
         )}
         {state.kind === "error" && (
@@ -320,7 +413,11 @@ function currentPage(state: DetectState): number {
 function activeContext(
   state: DetectState,
 ): { file: File; page: number; pageCount: number } | null {
-  if (state.kind === "preview" || state.kind === "detecting" || state.kind === "detected") {
+  if (
+    state.kind === "preview" ||
+    state.kind === "detecting" ||
+    state.kind === "detected"
+  ) {
     return { file: state.file, page: state.page, pageCount: state.pageCount };
   }
   return null;
@@ -371,9 +468,7 @@ function Toolbar({
       <button
         type="button"
         onClick={onNext}
-        disabled={
-          busy || pageCount === null || page >= pageCount - 1
-        }
+        disabled={busy || pageCount === null || page >= pageCount - 1}
       >
         Next →
       </button>
@@ -452,17 +547,33 @@ function HealthBadge({ state }: { state: HealthState }) {
 function DetectionLayout({
   state,
   selectedId,
+  hiddenCodes,
+  drawMode,
   onSelect,
+  onToggleDrawMode,
+  onToggleCodeVisibility,
+  onMoveBox,
+  onAddBox,
+  onDeleteBox,
+  onRelabelBox,
 }: {
   state: Extract<DetectState, { kind: "detected" }>;
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  hiddenCodes: Set<string>;
+  drawMode: boolean;
+  onSelect: (id: string | null) => void;
+  onToggleDrawMode: () => void;
+  onToggleCodeVisibility: (code: string) => void;
+  onMoveBox: (id: string, bbox: [number, number, number, number]) => void;
+  onAddBox: (bbox: [number, number, number, number]) => void;
+  onDeleteBox: (id: string) => void;
+  onRelabelBox: (id: string) => void;
 }) {
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) 300px",
+        gridTemplateColumns: "minmax(0, 1fr) 320px",
         gap: "1.5rem",
       }}
     >
@@ -475,17 +586,47 @@ function DetectionLayout({
         fileName={state.fileName}
         detections={state.detections}
         selectedId={selectedId}
+        hiddenCodes={hiddenCodes}
+        drawMode={drawMode}
+        editable={true}
         onSelect={onSelect}
+        onMoveBox={onMoveBox}
+        onAddBox={onAddBox}
       />
       <SidePanel
         detections={state.detections}
-        counts={state.counts}
         selectedId={selectedId}
+        hiddenCodes={hiddenCodes}
+        drawMode={drawMode}
         onSelect={onSelect}
+        onToggleDrawMode={onToggleDrawMode}
+        onToggleCodeVisibility={onToggleCodeVisibility}
+        onDeleteBox={onDeleteBox}
+        onRelabelBox={onRelabelBox}
       />
     </div>
   );
 }
+
+type DragState =
+  | {
+      kind: "move";
+      id: string;
+      startImg: { x: number; y: number };
+      startBox: [number, number, number, number];
+    }
+  | {
+      kind: "resize";
+      id: string;
+      corner: "nw" | "ne" | "sw" | "se";
+      startImg: { x: number; y: number };
+      startBox: [number, number, number, number];
+    }
+  | {
+      kind: "draw";
+      startImg: { x: number; y: number };
+      currentImg: { x: number; y: number };
+    };
 
 function ImageWithOverlay({
   imageUrl,
@@ -496,7 +637,12 @@ function ImageWithOverlay({
   pageCount,
   detections,
   selectedId,
+  hiddenCodes,
+  drawMode,
+  editable,
   onSelect,
+  onMoveBox,
+  onAddBox,
 }: {
   imageUrl: string;
   width: number;
@@ -506,8 +652,128 @@ function ImageWithOverlay({
   pageCount: number;
   detections: Detection[];
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  hiddenCodes: Set<string>;
+  drawMode: boolean;
+  editable: boolean;
+  onSelect: (id: string | null) => void;
+  onMoveBox: (id: string, bbox: [number, number, number, number]) => void;
+  onAddBox: (bbox: [number, number, number, number]) => void;
 }) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+
+  function toImg(clientX: number, clientY: number): { x: number; y: number } | null {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return {
+      x: ((clientX - rect.left) / rect.width) * width,
+      y: ((clientY - rect.top) / rect.height) * height,
+    };
+  }
+
+  useEffect(() => {
+    if (!drag) return;
+    function onMove(e: PointerEvent) {
+      if (!drag) return;
+      const pt = toImg(e.clientX, e.clientY);
+      if (!pt) return;
+      if (drag.kind === "move") {
+        const dx = pt.x - drag.startImg.x;
+        const dy = pt.y - drag.startImg.y;
+        const [bx, by, bw, bh] = drag.startBox;
+        onMoveBox(drag.id, [bx + dx, by + dy, bw, bh]);
+      } else if (drag.kind === "resize") {
+        const [bx, by, bw, bh] = drag.startBox;
+        let nx = bx;
+        let ny = by;
+        let nw = bw;
+        let nh = bh;
+        if (drag.corner === "nw") {
+          nx = pt.x;
+          ny = pt.y;
+          nw = bx + bw - pt.x;
+          nh = by + bh - pt.y;
+        } else if (drag.corner === "ne") {
+          ny = pt.y;
+          nw = pt.x - bx;
+          nh = by + bh - pt.y;
+        } else if (drag.corner === "sw") {
+          nx = pt.x;
+          nw = bx + bw - pt.x;
+          nh = pt.y - by;
+        } else if (drag.corner === "se") {
+          nw = pt.x - bx;
+          nh = pt.y - by;
+        }
+        if (nw > 4 && nh > 4) onMoveBox(drag.id, [nx, ny, nw, nh]);
+      } else {
+        setDrag({ ...drag, currentImg: pt });
+      }
+    }
+    function onUp() {
+      if (drag && drag.kind === "draw") {
+        const x = Math.min(drag.startImg.x, drag.currentImg.x);
+        const y = Math.min(drag.startImg.y, drag.currentImg.y);
+        const w = Math.abs(drag.currentImg.x - drag.startImg.x);
+        const h = Math.abs(drag.currentImg.y - drag.startImg.y);
+        if (w > 4 && h > 4) onAddBox([x, y, w, h]);
+      }
+      setDrag(null);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [drag, onMoveBox, onAddBox, width, height]);
+
+  function onSvgPointerDown(e: React.PointerEvent<SVGSVGElement>) {
+    if (!editable) return;
+    if (drawMode) {
+      const pt = toImg(e.clientX, e.clientY);
+      if (!pt) return;
+      setDrag({ kind: "draw", startImg: pt, currentImg: pt });
+    } else if (e.target === svgRef.current) {
+      onSelect(null);
+    }
+  }
+
+  function startMove(e: React.PointerEvent, det: Detection) {
+    if (!editable || drawMode) return;
+    e.stopPropagation();
+    const pt = toImg(e.clientX, e.clientY);
+    if (!pt) return;
+    onSelect(det.id);
+    setDrag({ kind: "move", id: det.id, startImg: pt, startBox: det.bbox });
+  }
+
+  function startResize(
+    e: React.PointerEvent,
+    det: Detection,
+    corner: "nw" | "ne" | "sw" | "se",
+  ) {
+    if (!editable || drawMode) return;
+    e.stopPropagation();
+    const pt = toImg(e.clientX, e.clientY);
+    if (!pt) return;
+    setDrag({ kind: "resize", id: det.id, corner, startImg: pt, startBox: det.bbox });
+  }
+
+  const visible = detections.filter((d) => !hiddenCodes.has(d.text));
+  const draftBox =
+    drag?.kind === "draw"
+      ? {
+          x: Math.min(drag.startImg.x, drag.currentImg.x),
+          y: Math.min(drag.startImg.y, drag.currentImg.y),
+          w: Math.abs(drag.currentImg.x - drag.startImg.x),
+          h: Math.abs(drag.currentImg.y - drag.startImg.y),
+        }
+      : null;
+  const handleRadius = Math.max(width, height) / 120;
+
   return (
     <div>
       <p style={{ fontSize: 14, color: "#555", margin: "0 0 0.5rem" }}>
@@ -533,6 +799,7 @@ function ImageWithOverlay({
           style={{ display: "block", maxWidth: "100%", height: "auto" }}
         />
         <svg
+          ref={svgRef}
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="xMinYMin meet"
           style={{
@@ -541,17 +808,38 @@ function ImageWithOverlay({
             left: 0,
             width: "100%",
             height: "100%",
-            pointerEvents: "none",
+            pointerEvents: editable ? "all" : "none",
+            cursor: drawMode ? "crosshair" : "default",
+            touchAction: "none",
           }}
+          onPointerDown={onSvgPointerDown}
         >
-          {detections.map((d) => (
+          {visible.map((d) => (
             <DetectionBox
               key={d.id}
               det={d}
               selected={selectedId === d.id}
-              onClick={() => onSelect(d.id)}
+              editable={editable}
+              drawMode={drawMode}
+              handleRadius={handleRadius}
+              onPointerDown={(e) => startMove(e, d)}
+              onResizePointerDown={(e, corner) => startResize(e, d, corner)}
             />
           ))}
+          {draftBox && (
+            <rect
+              x={draftBox.x}
+              y={draftBox.y}
+              width={draftBox.w}
+              height={draftBox.h}
+              fill="rgba(42,109,244,0.18)"
+              stroke="#2a6df4"
+              strokeWidth={2}
+              vectorEffect="non-scaling-stroke"
+              strokeDasharray="6 4"
+              pointerEvents="none"
+            />
+          )}
         </svg>
       </div>
     </div>
@@ -561,22 +849,42 @@ function ImageWithOverlay({
 function DetectionBox({
   det,
   selected,
-  onClick,
+  editable,
+  drawMode,
+  handleRadius,
+  onPointerDown,
+  onResizePointerDown,
 }: {
   det: Detection;
   selected: boolean;
-  onClick: () => void;
+  editable: boolean;
+  drawMode: boolean;
+  handleRadius: number;
+  onPointerDown: (e: React.PointerEvent) => void;
+  onResizePointerDown: (
+    e: React.PointerEvent,
+    corner: "nw" | "ne" | "sw" | "se",
+  ) => void;
 }) {
   const [x, y, w, h] = det.bbox;
   const stroke = selected ? "#ff8c00" : "#16a34a";
   const fill = selected ? "rgba(255,140,0,0.22)" : "rgba(22,163,74,0.15)";
   const fontSize = Math.max(12, h * 0.7);
+  const interactive = editable && !drawMode;
+  const corners: ["nw" | "ne" | "sw" | "se", number, number][] = [
+    ["nw", x, y],
+    ["ne", x + w, y],
+    ["sw", x, y + h],
+    ["se", x + w, y + h],
+  ];
+  const cursorByCorner = {
+    nw: "nwse-resize",
+    se: "nwse-resize",
+    ne: "nesw-resize",
+    sw: "nesw-resize",
+  } as const;
   return (
-    <g
-      style={{ pointerEvents: "all", cursor: "pointer" }}
-      onClick={onClick}
-      data-detection-id={det.id}
-    >
+    <g data-detection-id={det.id}>
       <rect
         x={x}
         y={y}
@@ -586,6 +894,12 @@ function DetectionBox({
         stroke={stroke}
         strokeWidth={2}
         vectorEffect="non-scaling-stroke"
+        style={{
+          pointerEvents: interactive ? "all" : "none",
+          cursor: interactive ? "move" : "default",
+          touchAction: "none",
+        }}
+        onPointerDown={onPointerDown}
       />
       <text
         x={x}
@@ -593,24 +907,58 @@ function DetectionBox({
         fill={stroke}
         fontSize={fontSize}
         style={{ fontFamily: "system-ui, sans-serif", fontWeight: 600 }}
+        pointerEvents="none"
       >
         {det.text}
       </text>
+      {selected && interactive &&
+        corners.map(([corner, cx, cy]) => (
+          <circle
+            key={corner}
+            cx={cx}
+            cy={cy}
+            r={handleRadius}
+            fill="#fff"
+            stroke={stroke}
+            strokeWidth={2}
+            vectorEffect="non-scaling-stroke"
+            style={{
+              cursor: cursorByCorner[corner],
+              touchAction: "none",
+            }}
+            onPointerDown={(e) => onResizePointerDown(e, corner)}
+          />
+        ))}
     </g>
   );
 }
 
 function SidePanel({
   detections,
-  counts,
   selectedId,
+  hiddenCodes,
+  drawMode,
   onSelect,
+  onToggleDrawMode,
+  onToggleCodeVisibility,
+  onDeleteBox,
+  onRelabelBox,
 }: {
   detections: Detection[];
-  counts: Record<string, number>;
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  hiddenCodes: Set<string>;
+  drawMode: boolean;
+  onSelect: (id: string | null) => void;
+  onToggleDrawMode: () => void;
+  onToggleCodeVisibility: (code: string) => void;
+  onDeleteBox: (id: string) => void;
+  onRelabelBox: (id: string) => void;
 }) {
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const d of detections) c[d.text] = (c[d.text] ?? 0) + 1;
+    return c;
+  }, [detections]);
   const codes = useMemo(
     () => Object.keys(counts).sort(lfCodeCompare),
     [counts],
@@ -639,9 +987,40 @@ function SidePanel({
         overflowY: "auto",
       }}
     >
-      <h2 style={{ fontSize: 16, margin: "0 0 0.25rem" }}>Detected codes</h2>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: "0.5rem",
+        }}
+      >
+        <h2 style={{ fontSize: 16, margin: 0 }}>Detected codes</h2>
+        <button
+          type="button"
+          onClick={onToggleDrawMode}
+          style={{
+            background: drawMode ? "#2a6df4" : "transparent",
+            color: drawMode ? "#fff" : "#2a6df4",
+            border: "1px solid #2a6df4",
+            padding: "2px 8px",
+            borderRadius: 4,
+            fontSize: 12,
+            cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+        >
+          {drawMode ? "Cancel" : "+ Draw box"}
+        </button>
+      </div>
       <p style={{ fontSize: 13, color: "#555", margin: "0 0 0.75rem" }}>
         {detections.length} total
+        {drawMode && (
+          <span style={{ color: "#2a6df4" }}>
+            {" "}
+            · click-drag on image to add
+          </span>
+        )}
       </p>
       {codes.length === 0 ? (
         <p style={{ fontSize: 13, color: "#777" }}>No LF codes detected.</p>
@@ -652,9 +1031,13 @@ function SidePanel({
               key={code}
               code={code}
               count={counts[code]}
+              hidden={hiddenCodes.has(code)}
               detections={byCode.get(code) ?? []}
               selectedId={selectedId}
               onSelect={onSelect}
+              onToggleVisibility={() => onToggleCodeVisibility(code)}
+              onDeleteBox={onDeleteBox}
+              onRelabelBox={onRelabelBox}
             />
           ))}
         </ul>
@@ -666,15 +1049,23 @@ function SidePanel({
 function CodeGroup({
   code,
   count,
+  hidden,
   detections,
   selectedId,
   onSelect,
+  onToggleVisibility,
+  onDeleteBox,
+  onRelabelBox,
 }: {
   code: string;
   count: number;
+  hidden: boolean;
   detections: Detection[];
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string | null) => void;
+  onToggleVisibility: () => void;
+  onDeleteBox: (id: string) => void;
+  onRelabelBox: (id: string) => void;
 }) {
   return (
     <li style={{ marginBottom: "0.75rem" }}>
@@ -682,11 +1073,20 @@ function CodeGroup({
         style={{
           display: "flex",
           justifyContent: "space-between",
+          alignItems: "center",
           fontWeight: 600,
           fontSize: 14,
+          opacity: hidden ? 0.5 : 1,
         }}
       >
-        <span>{code}</span>
+        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={!hidden}
+            onChange={onToggleVisibility}
+          />
+          <span>{code}</span>
+        </label>
         <span style={{ color: "#555" }}>{count}</span>
       </div>
       <ul
@@ -696,29 +1096,77 @@ function CodeGroup({
           margin: 0,
         }}
       >
-        {detections.map((d) => (
-          <li key={d.id}>
-            <button
-              type="button"
-              onClick={() => onSelect(d.id)}
-              style={{
-                width: "100%",
-                textAlign: "left",
-                background:
-                  selectedId === d.id ? "#fff3e0" : "transparent",
-                border: `1px solid ${selectedId === d.id ? "#ff8c00" : "transparent"}`,
-                padding: "2px 6px",
-                borderRadius: 4,
-                cursor: "pointer",
-                fontSize: 12,
-                color: "#444",
-                fontFamily: "inherit",
-              }}
-            >
-              {d.id} · {(d.confidence * 100).toFixed(0)}%
-            </button>
-          </li>
-        ))}
+        {detections.map((d) => {
+          const isSelected = selectedId === d.id;
+          return (
+            <li key={d.id} style={{ marginBottom: 2 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                  background: isSelected ? "#fff3e0" : "transparent",
+                  border: `1px solid ${isSelected ? "#ff8c00" : "transparent"}`,
+                  borderRadius: 4,
+                  padding: "2px 6px",
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelect(d.id)}
+                  style={{
+                    flex: 1,
+                    textAlign: "left",
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                    fontSize: 12,
+                    color: "#444",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  {d.id} · {(d.confidence * 100).toFixed(0)}%
+                </button>
+                {isSelected && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => onRelabelBox(d.id)}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid #ccc",
+                        borderRadius: 3,
+                        padding: "0 4px",
+                        fontSize: 11,
+                        cursor: "pointer",
+                        fontFamily: "inherit",
+                      }}
+                    >
+                      Relabel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDeleteBox(d.id)}
+                      style={{
+                        background: "transparent",
+                        border: "1px solid #b42318",
+                        color: "#b42318",
+                        borderRadius: 3,
+                        padding: "0 4px",
+                        fontSize: 11,
+                        cursor: "pointer",
+                        fontFamily: "inherit",
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </li>
   );
