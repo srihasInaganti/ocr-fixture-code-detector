@@ -43,11 +43,17 @@ def health():
     return {"status": "ok"}
 
 
-def _render_page(pdf_bytes: bytes, page: int, dpi: int) -> tuple[bytes, int, int, int]:
+def _render_page(
+    pdf_bytes: bytes, page: int, dpi: int, rotation: int
+) -> tuple[bytes, int, int, int]:
     """Returns (png_bytes, width, height, page_count)."""
     if dpi <= 0 or dpi > MAX_RENDER_DPI:
         raise HTTPException(
             status_code=400, detail=f"dpi must be in (0, {MAX_RENDER_DPI}]"
+        )
+    if rotation not in (0, 90, 180, 270):
+        raise HTTPException(
+            status_code=400, detail="rotation must be 0, 90, 180, or 270"
         )
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="Empty upload")
@@ -64,10 +70,11 @@ def _render_page(pdf_bytes: bytes, page: int, dpi: int) -> tuple[bytes, int, int
                 status_code=400,
                 detail=f"page {page} out of range (PDF has {page_count} pages)",
             )
+        p = doc.load_page(page)
+        if rotation:
+            p.set_rotation((p.rotation + rotation) % 360)
         zoom = dpi / 72.0
-        pix = doc.load_page(page).get_pixmap(
-            matrix=fitz.Matrix(zoom, zoom), alpha=False
-        )
+        pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         return pix.tobytes("png"), pix.width, pix.height, page_count
     finally:
         doc.close()
@@ -78,9 +85,10 @@ async def render_pdf(
     file: UploadFile = File(...),
     page: int = Form(DEFAULT_PAGE_INDEX),
     dpi: int = Form(DEFAULT_RENDER_DPI),
+    rotation: int = Form(0),
 ):
     data = await file.read()
-    png, width, height, page_count = _render_page(data, page, dpi)
+    png, width, height, page_count = _render_page(data, page, dpi, rotation)
     return Response(
         content=png,
         media_type="image/png",
@@ -116,9 +124,10 @@ async def detect(
     file: UploadFile = File(...),
     page: int = Form(DEFAULT_PAGE_INDEX),
     dpi: int = Form(DEFAULT_RENDER_DPI),
+    rotation: int = Form(0),
 ):
     data = await file.read()
-    png, width, height, page_count = _render_page(data, page, dpi)
+    png, width, height, page_count = _render_page(data, page, dpi, rotation)
 
     try:
         provider = get_provider()

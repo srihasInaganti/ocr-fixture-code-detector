@@ -57,6 +57,7 @@ export default function App() {
   const [dragOver, setDragOver] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pageInput, setPageInput] = useState("1");
+  const [rotation, setRotation] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -81,7 +82,7 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  async function renderPage(file: File, page: number) {
+  async function renderPage(file: File, page: number, rot: number) {
     if (!API_BASE_URL) return;
     setState({ kind: "rendering", file, fileName: file.name, page });
     setSelectedId(null);
@@ -90,6 +91,7 @@ export default function App() {
       const form = new FormData();
       form.append("file", file);
       form.append("page", String(page));
+      form.append("rotation", String(rot));
       const res = await fetch(`${API_BASE_URL}/render`, {
         method: "POST",
         body: form,
@@ -139,6 +141,7 @@ export default function App() {
       const form = new FormData();
       form.append("file", file);
       form.append("page", String(page));
+      form.append("rotation", String(rotation));
       const res = await fetch(`${API_BASE_URL}/detect`, {
         method: "POST",
         body: form,
@@ -173,7 +176,14 @@ export default function App() {
     if (!ctx) return;
     const clamped = Math.max(0, Math.min(ctx.pageCount - 1, target));
     if (clamped === ctx.page) return;
-    void renderPage(ctx.file, clamped);
+    void renderPage(ctx.file, clamped, rotation);
+  }
+
+  function rotate() {
+    const next = (rotation + 90) % 360;
+    setRotation(next);
+    const ctx = activeContext(state);
+    if (ctx) void renderPage(ctx.file, ctx.page, next);
   }
 
   function pickFile(files: FileList | null) {
@@ -183,7 +193,7 @@ export default function App() {
       setState({ kind: "error", message: `Expected a PDF, got ${file.type}` });
       return;
     }
-    void renderPage(file, 0);
+    void renderPage(file, 0, rotation);
   }
 
   const showToolbar =
@@ -247,6 +257,8 @@ export default function App() {
             state={state}
             pageInput={pageInput}
             onPageInputChange={setPageInput}
+            rotation={rotation}
+            onRotate={rotate}
             onPrev={() => goToPage(currentPage(state) - 1)}
             onNext={() => goToPage(currentPage(state) + 1)}
             onJump={() => {
@@ -318,6 +330,8 @@ function Toolbar({
   state,
   pageInput,
   onPageInputChange,
+  rotation,
+  onRotate,
   onPrev,
   onNext,
   onJump,
@@ -326,6 +340,8 @@ function Toolbar({
   state: DetectState;
   pageInput: string;
   onPageInputChange: (s: string) => void;
+  rotation: number;
+  onRotate: () => void;
   onPrev: () => void;
   onNext: () => void;
   onJump: () => void;
@@ -379,6 +395,9 @@ function Toolbar({
           <span style={{ color: "#666" }}> of {pageCount}</span>
         )}
       </label>
+      <button type="button" onClick={onRotate} disabled={busy}>
+        ↻ Rotate 90°{rotation !== 0 ? ` (now ${rotation}°)` : ""}
+      </button>
       <span style={{ flex: 1 }} />
       <button
         type="button"
