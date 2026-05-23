@@ -14,7 +14,13 @@ type HealthState =
 
 type DetectState =
   | { kind: "idle" }
-  | { kind: "rendering"; file: File; fileName: string; page: number }
+  | {
+      kind: "rendering";
+      file: File;
+      fileName: string;
+      page: number;
+      prev: { imageUrl: string; width: number; height: number } | null;
+    }
   | {
       kind: "preview";
       file: File;
@@ -89,7 +95,13 @@ export default function App() {
   async function renderPage(file: File, page: number, rot: number) {
     if (!API_BASE_URL) return;
     const prior = state;
-    setState({ kind: "rendering", file, fileName: file.name, page });
+    const prev =
+      prior.kind === "preview" ||
+      prior.kind === "detecting" ||
+      prior.kind === "detected"
+        ? { imageUrl: prior.imageUrl, width: prior.width, height: prior.height }
+        : null;
+    setState({ kind: "rendering", file, fileName: file.name, page, prev });
     setSelectedId(null);
     setDrawMode(false);
     setPageInput(String(page + 1));
@@ -324,69 +336,94 @@ export default function App() {
     );
   }
 
+  function onDropFiles(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    pickFile(e.dataTransfer.files);
+  }
+  function onDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(true);
+  }
+  function onDragLeave() {
+    setDragOver(false);
+  }
+
   const showToolbar =
     state.kind === "rendering" ||
     state.kind === "preview" ||
     state.kind === "detecting" ||
     state.kind === "detected";
 
+  const fileInfo = activeFileInfo(state);
+
   return (
-    <main
-      style={{
-        fontFamily: "system-ui, sans-serif",
-        maxWidth: 1400,
-        margin: "2rem auto",
-        padding: "0 1rem",
-      }}
-    >
-      <header style={{ display: "flex", alignItems: "baseline", gap: "1rem" }}>
-        <h1 style={{ margin: 0 }}>OCR Fixture Code Detector</h1>
+    <main className="app">
+      <header className="app-header">
+        <h1>OCR Fixture Code Detector</h1>
         <HealthBadge state={health} />
       </header>
 
-      <section style={{ marginTop: "1.5rem" }}>
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOver(true);
-          }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragOver(false);
-            pickFile(e.dataTransfer.files);
-          }}
-          onClick={() => fileInputRef.current?.click()}
-          style={{
-            border: `2px dashed ${dragOver ? "#2a6df4" : "#bbb"}`,
-            background: dragOver ? "#eef3ff" : "#fafafa",
-            padding: "1.25rem",
-            borderRadius: 8,
-            textAlign: "center",
-            cursor: "pointer",
-          }}
-        >
-          <p style={{ margin: 0 }}>
-            <strong>Drop a PDF here</strong>, or click to choose.
-          </p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/pdf"
-            style={{ display: "none" }}
-            onChange={(e) => pickFile(e.target.files)}
-          />
-        </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/pdf"
+        style={{ display: "none" }}
+        onChange={(e) => pickFile(e.target.files)}
+      />
+
+      <section className="section">
+        {fileInfo == null ? (
+          <div
+            className={`dropzone ${dragOver ? "drag-over" : ""}`}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDropFiles}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <p>
+              <strong>Drop a PDF here</strong>, or click to choose
+            </p>
+            <p className="dz-sub">
+              Architectural lighting plans, electrical drawings, etc.
+            </p>
+          </div>
+        ) : (
+          <div
+            className="file-strip"
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDropFiles}
+            style={dragOver ? { borderColor: "var(--accent)" } : undefined}
+          >
+            <span className="icon">PDF</span>
+            <span className="name">{fileInfo.fileName}</span>
+            {fileInfo.pageCount !== null && (
+              <span className="meta">
+                · {fileInfo.pageCount} page
+                {fileInfo.pageCount === 1 ? "" : "s"}
+              </span>
+            )}
+            <span className="spacer" />
+            <button
+              type="button"
+              className="btn-sm"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Change file
+            </button>
+          </div>
+        )}
       </section>
 
       {error && (
-        <section style={{ marginTop: "1rem" }}>
+        <section className="section">
           <ErrorBanner error={error} onDismiss={() => setError(null)} />
         </section>
       )}
 
       {showToolbar && (
-        <section style={{ marginTop: "1rem" }}>
+        <section className="section">
           <Toolbar
             state={state}
             pageInput={pageInput}
@@ -404,30 +441,70 @@ export default function App() {
         </section>
       )}
 
-      <section style={{ marginTop: "1.5rem" }}>
-        {state.kind === "rendering" && (
-          <p>
-            Rendering {state.fileName}, page {state.page + 1}…
-          </p>
-        )}
-        {state.kind === "detecting" && (
-          <p>
-            Running OCR on {state.fileName}, page {state.page + 1}…
-          </p>
-        )}
-        {state.kind === "preview" && (
-          <ImageWithOverlay
-            imageUrl={state.imageUrl}
-            width={state.width}
-            height={state.height}
-            page={state.page}
-            pageCount={state.pageCount}
+      <section className="section">
+        {state.kind === "rendering" && state.prev && (
+          <Viewer
+            imageUrl={state.prev.imageUrl}
+            width={state.prev.width}
+            height={state.prev.height}
             fileName={state.fileName}
+            page={state.page}
+            pageCount={null}
             detections={[]}
             selectedId={null}
             hiddenCodes={new Set()}
             drawMode={false}
             editable={false}
+            loading
+            loadingLabel="Rendering"
+            onSelect={() => {}}
+            onMoveBox={() => {}}
+            onAddBox={() => {}}
+          />
+        )}
+        {state.kind === "rendering" && !state.prev && (
+          <div className="status-message">
+            <span className="spinner spinner-lg" />
+            <span>
+              Rendering <code>{state.fileName}</code>, page {state.page + 1}…
+            </span>
+          </div>
+        )}
+        {state.kind === "preview" && (
+          <Viewer
+            imageUrl={state.imageUrl}
+            width={state.width}
+            height={state.height}
+            fileName={state.fileName}
+            page={state.page}
+            pageCount={state.pageCount}
+            detections={[]}
+            selectedId={null}
+            hiddenCodes={new Set()}
+            drawMode={false}
+            editable={false}
+            loading={false}
+            onSelect={() => {}}
+            onMoveBox={() => {}}
+            onAddBox={() => {}}
+          />
+        )}
+        {state.kind === "detecting" && (
+          <Viewer
+            imageUrl={state.imageUrl}
+            width={state.width}
+            height={state.height}
+            fileName={state.fileName}
+            page={state.page}
+            pageCount={state.pageCount}
+            detections={[]}
+            selectedId={null}
+            hiddenCodes={new Set()}
+            drawMode={false}
+            editable={false}
+            loading
+            loadingLabel="Running OCR"
+            loadingVariant="ocr"
             onSelect={() => {}}
             onMoveBox={() => {}}
             onAddBox={() => {}}
@@ -480,6 +557,16 @@ function activeContext(
   return null;
 }
 
+function activeFileInfo(
+  state: DetectState,
+): { fileName: string; pageCount: number | null } | null {
+  if (state.kind === "idle") return null;
+  if (state.kind === "rendering") {
+    return { fileName: state.fileName, pageCount: null };
+  }
+  return { fileName: state.fileName, pageCount: state.pageCount };
+}
+
 function Toolbar({
   state,
   pageInput,
@@ -505,97 +592,84 @@ function Toolbar({
   const ctx = activeContext(state);
   const page = currentPage(state);
   const pageCount = ctx?.pageCount ?? null;
-  const canRun = (state.kind === "preview" || state.kind === "detected") && !busy;
+  const canRun =
+    (state.kind === "preview" || state.kind === "detected") && !busy;
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "0.5rem",
-        flexWrap: "wrap",
-      }}
-    >
-      <button
-        type="button"
-        onClick={onPrev}
-        disabled={busy || pageCount === null || page <= 0}
-      >
-        ← Prev
-      </button>
-      <button
-        type="button"
-        onClick={onNext}
-        disabled={busy || pageCount === null || page >= pageCount - 1}
-      >
-        Next →
-      </button>
-      <label style={{ fontSize: 14 }}>
-        Page{" "}
-        <input
-          type="number"
-          min={1}
-          max={pageCount ?? undefined}
-          value={pageInput}
-          onChange={(e) => onPageInputChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onJump();
-          }}
-          disabled={busy || pageCount === null}
-          style={{ width: 64 }}
-        />
-        {pageCount !== null && (
-          <span style={{ color: "#666" }}> of {pageCount}</span>
-        )}
-      </label>
+    <div className="toolbar">
+      <div className="toolbar-group">
+        <button
+          type="button"
+          onClick={onPrev}
+          disabled={busy || pageCount === null || page <= 0}
+          title="Previous page"
+        >
+          ←
+        </button>
+        <span className="toolbar-page">
+          <input
+            type="number"
+            min={1}
+            max={pageCount ?? undefined}
+            value={pageInput}
+            onChange={(e) => onPageInputChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onJump();
+            }}
+            disabled={busy || pageCount === null}
+          />
+          <span>of {pageCount ?? "—"}</span>
+        </span>
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={busy || pageCount === null || page >= (pageCount ?? 0) - 1}
+          title="Next page"
+        >
+          →
+        </button>
+      </div>
       <button type="button" onClick={onRotate} disabled={busy}>
-        ↻ Rotate 90°{rotation !== 0 ? ` (now ${rotation}°)` : ""}
+        ↻ Rotate
+        {rotation !== 0 && (
+          <span style={{ marginLeft: 6, color: "var(--text-muted)" }}>
+            {rotation}°
+          </span>
+        )}
       </button>
-      <span style={{ flex: 1 }} />
+      <span className="toolbar-spacer" />
       <button
         type="button"
+        className="btn-primary"
         onClick={onRun}
         disabled={!canRun}
-        style={{
-          background: canRun ? "#2a6df4" : "#cbd5e1",
-          color: "#fff",
-          border: "none",
-          padding: "0.5rem 1rem",
-          borderRadius: 6,
-          fontWeight: 600,
-          cursor: canRun ? "pointer" : "not-allowed",
-        }}
       >
-        {state.kind === "detected"
-          ? "Re-run OCR on this page"
-          : "Run OCR on this page"}
+        {state.kind === "detecting" ? (
+          <span className="inline-row">
+            <span className="spinner spinner-on-primary" />
+            Running OCR…
+          </span>
+        ) : state.kind === "detected" ? (
+          "Re-run OCR"
+        ) : (
+          "Run OCR on this page"
+        )}
       </button>
     </div>
   );
 }
 
 function HealthBadge({ state }: { state: HealthState }) {
-  const color =
-    state.kind === "ok"
-      ? "#1a7f37"
-      : state.kind === "error"
-        ? "#b42318"
-        : "#888";
+  const cls =
+    state.kind === "ok" ? "ok" : state.kind === "error" ? "err" : "loading";
   const label =
     state.kind === "ok"
-      ? "backend: ok"
+      ? "backend ok"
       : state.kind === "error"
-        ? `backend: ${state.message}`
-        : "backend: checking…";
+        ? "backend down"
+        : "checking…";
   return (
-    <span
-      style={{
-        fontSize: 12,
-        color,
-        border: `1px solid ${color}`,
-        padding: "2px 8px",
-        borderRadius: 999,
-      }}
-    >
+    <span className={`badge ${cls}`} title={state.kind === "error" ? state.message : undefined}>
+      <span className="badge-dot" />
       {label}
     </span>
   );
@@ -631,25 +705,20 @@ function DetectionLayout({
   onExportCsv: () => void;
 }) {
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) 320px",
-        gap: "1.5rem",
-      }}
-    >
-      <ImageWithOverlay
+    <div className="detection-layout">
+      <Viewer
         imageUrl={state.imageUrl}
         width={state.width}
         height={state.height}
+        fileName={state.fileName}
         page={state.page}
         pageCount={state.pageCount}
-        fileName={state.fileName}
         detections={state.detections}
         selectedId={selectedId}
         hiddenCodes={hiddenCodes}
         drawMode={drawMode}
         editable={true}
+        loading={false}
         onSelect={onSelect}
         onMoveBox={onMoveBox}
         onAddBox={onAddBox}
@@ -691,7 +760,7 @@ type DragState =
       currentImg: { x: number; y: number };
     };
 
-function ImageWithOverlay({
+function Viewer({
   imageUrl,
   width,
   height,
@@ -703,6 +772,9 @@ function ImageWithOverlay({
   hiddenCodes,
   drawMode,
   editable,
+  loading,
+  loadingLabel,
+  loadingVariant = "render",
   onSelect,
   onMoveBox,
   onAddBox,
@@ -712,12 +784,15 @@ function ImageWithOverlay({
   height: number;
   fileName: string;
   page: number;
-  pageCount: number;
+  pageCount: number | null;
   detections: Detection[];
   selectedId: string | null;
   hiddenCodes: Set<string>;
   drawMode: boolean;
   editable: boolean;
+  loading: boolean;
+  loadingLabel?: string;
+  loadingVariant?: "render" | "ocr";
   onSelect: (id: string | null) => void;
   onMoveBox: (id: string, bbox: [number, number, number, number]) => void;
   onAddBox: (bbox: [number, number, number, number]) => void;
@@ -725,7 +800,10 @@ function ImageWithOverlay({
   const svgRef = useRef<SVGSVGElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
 
-  function toImg(clientX: number, clientY: number): { x: number; y: number } | null {
+  function toImg(
+    clientX: number,
+    clientY: number,
+  ): { x: number; y: number } | null {
     const svg = svgRef.current;
     if (!svg) return null;
     const rect = svg.getBoundingClientRect();
@@ -822,7 +900,13 @@ function ImageWithOverlay({
     e.stopPropagation();
     const pt = toImg(e.clientX, e.clientY);
     if (!pt) return;
-    setDrag({ kind: "resize", id: det.id, corner, startImg: pt, startBox: det.bbox });
+    setDrag({
+      kind: "resize",
+      id: det.id,
+      corner,
+      startImg: pt,
+      startBox: det.bbox,
+    });
   }
 
   const visible = detections.filter((d) => !hiddenCodes.has(d.text));
@@ -838,43 +922,31 @@ function ImageWithOverlay({
   const handleRadius = Math.max(width, height) / 120;
 
   return (
-    <div>
-      <p style={{ fontSize: 14, color: "#555", margin: "0 0 0.5rem" }}>
-        <code>{fileName}</code> — page {page + 1} of {pageCount} — {width}×
-        {height} px
+    <div className="viewer">
+      <p className="meta">
+        <code>{fileName}</code>
+        {pageCount !== null && (
+          <span>
+            · page {page + 1} of {pageCount}
+          </span>
+        )}
+        <span>
+          · {width}×{height} px
+        </span>
       </p>
-      <div
-        style={{
-          position: "relative",
-          display: "inline-block",
-          maxWidth: "100%",
-          border: "1px solid #ddd",
-          borderRadius: 6,
-          overflow: "hidden",
-          background: "#fff",
-        }}
-      >
+      <div className={`image-wrap ${loading ? "dimmed" : ""}`}>
         <img
           src={imageUrl}
           alt={`PDF page ${page + 1}`}
           width={width}
           height={height}
-          style={{ display: "block", maxWidth: "100%", height: "auto" }}
         />
         <svg
           ref={svgRef}
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="xMinYMin meet"
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
-            pointerEvents: editable ? "all" : "none",
-            cursor: drawMode ? "crosshair" : "default",
-            touchAction: "none",
-          }}
+          className={`image-overlay-svg ${drawMode ? "draw-mode" : ""}`}
+          style={{ pointerEvents: editable && !loading ? "all" : "none" }}
           onPointerDown={onSvgPointerDown}
         >
           {visible.map((d) => (
@@ -895,8 +967,8 @@ function ImageWithOverlay({
               y={draftBox.y}
               width={draftBox.w}
               height={draftBox.h}
-              fill="rgba(42,109,244,0.18)"
-              stroke="#2a6df4"
+              fill="rgba(236,215,179,0.18)"
+              stroke="#ecd7b3"
               strokeWidth={2}
               vectorEffect="non-scaling-stroke"
               strokeDasharray="6 4"
@@ -904,6 +976,32 @@ function ImageWithOverlay({
             />
           )}
         </svg>
+        {loading && (
+          <div className="image-loading">
+            {loadingVariant === "ocr" && (
+              <>
+                <div className="scan-line" />
+                <div className="ocr-ring" />
+                <div className="ocr-ring inner" />
+              </>
+            )}
+            <div className="loading-content">
+              {loadingVariant !== "ocr" && (
+                <span className="spinner spinner-lg" />
+              )}
+              {loadingLabel && (
+                <span className="label">
+                  {loadingLabel}
+                  <span className="ellipsis">
+                    <i>.</i>
+                    <i>.</i>
+                    <i>.</i>
+                  </span>
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -930,8 +1028,8 @@ function DetectionBox({
   ) => void;
 }) {
   const [x, y, w, h] = det.bbox;
-  const stroke = selected ? "#ff8c00" : "#16a34a";
-  const fill = selected ? "rgba(255,140,0,0.22)" : "rgba(22,163,74,0.15)";
+  const stroke = selected ? "#ecd7b3" : "#7fc99a";
+  const fill = selected ? "rgba(236,215,179,0.22)" : "rgba(127,201,154,0.16)";
   const fontSize = Math.max(12, h * 0.7);
   const interactive = editable && !drawMode;
   const corners: ["nw" | "ne" | "sw" | "se", number, number][] = [
@@ -969,21 +1067,28 @@ function DetectionBox({
         y={y - 4}
         fill={stroke}
         fontSize={fontSize}
-        style={{ fontFamily: "system-ui, sans-serif", fontWeight: 600 }}
+        style={{
+          fontFamily: "system-ui, sans-serif",
+          fontWeight: 600,
+          paintOrder: "stroke",
+          stroke: "rgba(14,17,22,0.7)",
+          strokeWidth: 3,
+        }}
         pointerEvents="none"
       >
         {det.text}
       </text>
-      {selected && interactive &&
+      {selected &&
+        interactive &&
         corners.map(([corner, cx, cy]) => (
           <circle
             key={corner}
             cx={cx}
             cy={cy}
             r={handleRadius}
-            fill="#fff"
-            stroke={stroke}
-            strokeWidth={2}
+            fill="#ecd7b3"
+            stroke="#161a21"
+            strokeWidth={1.5}
             vectorEffect="non-scaling-stroke"
             style={{
               cursor: cursorByCorner[corner],
@@ -1039,95 +1144,67 @@ function SidePanel({
     }
     return m;
   }, [detections]);
+  const [collapsedCodes, setCollapsedCodes] = useState<Set<string>>(new Set());
+  const toggleCollapsed = (code: string) =>
+    setCollapsedCodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
 
   return (
-    <aside
-      style={{
-        border: "1px solid #ddd",
-        borderRadius: 6,
-        padding: "0.75rem 1rem",
-        background: "#fff",
-        position: "sticky",
-        top: "1rem",
-        alignSelf: "start",
-        maxHeight: "calc(100vh - 2rem)",
-        overflowY: "auto",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "0.5rem",
-        }}
-      >
-        <h2 style={{ fontSize: 16, margin: 0 }}>Detected codes</h2>
+    <aside className="side-panel">
+      <div className="side-panel-header">
+        <h2>Detected codes</h2>
         <button
           type="button"
+          className={`btn-sm ${drawMode ? "btn-toggle-on" : ""}`}
           onClick={onToggleDrawMode}
-          style={{
-            background: drawMode ? "#2a6df4" : "transparent",
-            color: drawMode ? "#fff" : "#2a6df4",
-            border: "1px solid #2a6df4",
-            padding: "2px 8px",
-            borderRadius: 4,
-            fontSize: 12,
-            cursor: "pointer",
-            fontFamily: "inherit",
-          }}
         >
           {drawMode ? "Cancel" : "+ Draw box"}
         </button>
       </div>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          marginBottom: "0.75rem",
-        }}
-      >
-        <span style={{ fontSize: 13, color: "#555", flex: 1 }}>
-          {detections.length} total
-          {drawMode && (
-            <span style={{ color: "#2a6df4" }}>
-              {" "}
-              · click-drag on image
-            </span>
-          )}
-        </span>
+      <div className="count-row">
+        <span className="count">{detections.length}</span>
+        <span>total</span>
+        {drawMode && <span className="draw-hint">· click-drag on image</span>}
+        <span className="grow" />
         <button
           type="button"
+          className="btn-sm btn-ghost"
           onClick={onExportJson}
           disabled={detections.length === 0}
-          style={{ fontSize: 12, padding: "2px 6px" }}
         >
           JSON
         </button>
         <button
           type="button"
+          className="btn-sm btn-ghost"
           onClick={onExportCsv}
           disabled={detections.length === 0}
-          style={{ fontSize: 12, padding: "2px 6px" }}
         >
           CSV
         </button>
       </div>
       {codes.length === 0 ? (
-        <p style={{ fontSize: 13, color: "#777" }}>No LF codes detected.</p>
+        <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+          No LF codes detected.
+        </p>
       ) : (
-        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+        <ul className="code-list">
           {codes.map((code) => (
             <CodeGroup
               key={code}
               code={code}
               count={counts[code]}
               hidden={hiddenCodes.has(code)}
+              collapsed={collapsedCodes.has(code)}
               detections={byCode.get(code) ?? []}
               selectedId={selectedId}
               onSelect={onSelect}
               onToggleVisibility={() => onToggleCodeVisibility(code)}
+              onToggleCollapse={() => toggleCollapsed(code)}
               onDeleteBox={onDeleteBox}
               onRelabelBox={onRelabelBox}
             />
@@ -1142,120 +1219,82 @@ function CodeGroup({
   code,
   count,
   hidden,
+  collapsed,
   detections,
   selectedId,
   onSelect,
   onToggleVisibility,
+  onToggleCollapse,
   onDeleteBox,
   onRelabelBox,
 }: {
   code: string;
   count: number;
   hidden: boolean;
+  collapsed: boolean;
   detections: Detection[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onToggleVisibility: () => void;
+  onToggleCollapse: () => void;
   onDeleteBox: (id: string) => void;
   onRelabelBox: (id: string) => void;
 }) {
   return (
-    <li style={{ marginBottom: "0.75rem" }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          fontWeight: 600,
-          fontSize: 14,
-          opacity: hidden ? 0.5 : 1,
-        }}
-      >
-        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="checkbox"
-            checked={!hidden}
-            onChange={onToggleVisibility}
-          />
+    <li
+      className={`code-group ${hidden ? "hidden" : ""} ${collapsed ? "collapsed" : ""}`}
+    >
+      <div className="code-group-header">
+        <input
+          type="checkbox"
+          checked={!hidden}
+          onChange={onToggleVisibility}
+          aria-label={`Show ${code}`}
+        />
+        <button
+          type="button"
+          className="code-group-toggle"
+          onClick={onToggleCollapse}
+          aria-expanded={!collapsed}
+        >
+          <span className="chevron">▾</span>
           <span>{code}</span>
-        </label>
-        <span style={{ color: "#555" }}>{count}</span>
+          <span className="count">{count}</span>
+        </button>
       </div>
-      <ul
-        style={{
-          listStyle: "none",
-          padding: "0.25rem 0 0 0.5rem",
-          margin: 0,
-        }}
-      >
+      <ul className="detection-list">
         {detections.map((d) => {
           const isSelected = selectedId === d.id;
           return (
-            <li key={d.id} style={{ marginBottom: 2 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  background: isSelected ? "#fff3e0" : "transparent",
-                  border: `1px solid ${isSelected ? "#ff8c00" : "transparent"}`,
-                  borderRadius: 4,
-                  padding: "2px 6px",
-                }}
+            <li
+              key={d.id}
+              className={`detection-item ${isSelected ? "selected" : ""}`}
+            >
+              <button
+                type="button"
+                className="label-btn"
+                onClick={() => onSelect(d.id)}
               >
-                <button
-                  type="button"
-                  onClick={() => onSelect(d.id)}
-                  style={{
-                    flex: 1,
-                    textAlign: "left",
-                    background: "transparent",
-                    border: "none",
-                    padding: 0,
-                    cursor: "pointer",
-                    fontSize: 12,
-                    color: "#444",
-                    fontFamily: "inherit",
-                  }}
-                >
-                  {d.id} · {(d.confidence * 100).toFixed(0)}%
-                </button>
-                {isSelected && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => onRelabelBox(d.id)}
-                      style={{
-                        background: "transparent",
-                        border: "1px solid #ccc",
-                        borderRadius: 3,
-                        padding: "0 4px",
-                        fontSize: 11,
-                        cursor: "pointer",
-                        fontFamily: "inherit",
-                      }}
-                    >
-                      Relabel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onDeleteBox(d.id)}
-                      style={{
-                        background: "transparent",
-                        border: "1px solid #b42318",
-                        color: "#b42318",
-                        borderRadius: 3,
-                        padding: "0 4px",
-                        fontSize: 11,
-                        cursor: "pointer",
-                        fontFamily: "inherit",
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </>
-                )}
-              </div>
+                {d.id} · {(d.confidence * 100).toFixed(0)}%
+              </button>
+              {isSelected && (
+                <>
+                  <button
+                    type="button"
+                    className="btn-sm btn-ghost"
+                    onClick={() => onRelabelBox(d.id)}
+                  >
+                    Relabel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-sm btn-danger"
+                    onClick={() => onDeleteBox(d.id)}
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
             </li>
           );
         })}
@@ -1283,23 +1322,13 @@ function ErrorBanner({
   onDismiss: () => void;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "0.75rem",
-        padding: "0.5rem 0.75rem",
-        background: "#fef3f2",
-        border: "1px solid #fecdca",
-        borderRadius: 6,
-      }}
-    >
-      <span style={{ color: "#b42318", fontSize: 14, flex: 1 }}>
-        ⚠ {error.message}
-      </span>
+    <div className="error-banner">
+      <span className="icon">!</span>
+      <span className="msg">{error.message}</span>
       {error.retry && (
         <button
           type="button"
+          className="btn-sm btn-danger"
           onClick={() => {
             onDismiss();
             error.retry!();
@@ -1308,7 +1337,7 @@ function ErrorBanner({
           Try again
         </button>
       )}
-      <button type="button" onClick={onDismiss}>
+      <button type="button" className="btn-sm btn-danger" onClick={onDismiss}>
         Dismiss
       </button>
     </div>
