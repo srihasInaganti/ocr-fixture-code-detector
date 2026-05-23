@@ -14,9 +14,30 @@ type HealthState =
 
 type DetectState =
   | { kind: "idle" }
-  | { kind: "uploading"; fileName: string }
+  | { kind: "rendering"; file: File; fileName: string; page: number }
+  | {
+      kind: "preview";
+      file: File;
+      fileName: string;
+      page: number;
+      pageCount: number;
+      imageUrl: string;
+      width: number;
+      height: number;
+    }
+  | {
+      kind: "detecting";
+      file: File;
+      fileName: string;
+      page: number;
+      pageCount: number;
+      imageUrl: string;
+      width: number;
+      height: number;
+    }
   | {
       kind: "detected";
+      file: File;
       fileName: string;
       imageUrl: string;
       width: number;
@@ -33,9 +54,9 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 export default function App() {
   const [health, setHealth] = useState<HealthState>({ kind: "loading" });
   const [state, setState] = useState<DetectState>({ kind: "idle" });
-  const [page, setPage] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [pageInput, setPageInput] = useState("1");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -60,9 +81,59 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  async function uploadFile(file: File) {
+  async function renderPage(file: File, page: number) {
     if (!API_BASE_URL) return;
-    setState({ kind: "uploading", fileName: file.name });
+    setState({ kind: "rendering", file, fileName: file.name, page });
+    setSelectedId(null);
+    setPageInput(String(page + 1));
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("page", String(page));
+      const res = await fetch(`${API_BASE_URL}/render`, {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status}: ${text}`);
+      }
+      const width = Number(res.headers.get("X-Image-Width"));
+      const height = Number(res.headers.get("X-Image-Height"));
+      const pageCount = Number(res.headers.get("X-Page-Count"));
+      const blob = await res.blob();
+      const imageUrl = URL.createObjectURL(blob);
+      setState({
+        kind: "preview",
+        file,
+        fileName: file.name,
+        page,
+        pageCount,
+        imageUrl,
+        width,
+        height,
+      });
+    } catch (err) {
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function runDetect() {
+    if (state.kind !== "preview" && state.kind !== "detected") return;
+    const { file, fileName, page, pageCount, imageUrl, width, height } = state;
+    setState({
+      kind: "detecting",
+      file,
+      fileName,
+      page,
+      pageCount,
+      imageUrl,
+      width,
+      height,
+    });
     setSelectedId(null);
     try {
       const form = new FormData();
@@ -79,7 +150,8 @@ export default function App() {
       const data = await res.json();
       setState({
         kind: "detected",
-        fileName: file.name,
+        file,
+        fileName,
         imageUrl: `data:${data.imageMime};base64,${data.image}`,
         width: data.width,
         height: data.height,
@@ -96,6 +168,14 @@ export default function App() {
     }
   }
 
+  function goToPage(target: number) {
+    const ctx = activeContext(state);
+    if (!ctx) return;
+    const clamped = Math.max(0, Math.min(ctx.pageCount - 1, target));
+    if (clamped === ctx.page) return;
+    void renderPage(ctx.file, clamped);
+  }
+
   function pickFile(files: FileList | null) {
     if (!files || files.length === 0) return;
     const file = files[0];
@@ -103,8 +183,14 @@ export default function App() {
       setState({ kind: "error", message: `Expected a PDF, got ${file.type}` });
       return;
     }
-    void uploadFile(file);
+    void renderPage(file, 0);
   }
+
+  const showToolbar =
+    state.kind === "rendering" ||
+    state.kind === "preview" ||
+    state.kind === "detecting" ||
+    state.kind === "detected";
 
   return (
     <main
@@ -152,26 +238,45 @@ export default function App() {
             style={{ display: "none" }}
             onChange={(e) => pickFile(e.target.files)}
           />
-          <div style={{ marginTop: "0.5rem", fontSize: 14, color: "#555" }}>
-            <label>
-              Page (0-indexed):{" "}
-              <input
-                type="number"
-                min={0}
-                value={page}
-                onChange={(e) => setPage(Math.max(0, Number(e.target.value)))}
-                onClick={(e) => e.stopPropagation()}
-                style={{ width: 64 }}
-              />
-            </label>
-          </div>
         </div>
       </section>
 
+      {showToolbar && (
+        <section style={{ marginTop: "1rem" }}>
+          <Toolbar
+            state={state}
+            pageInput={pageInput}
+            onPageInputChange={setPageInput}
+            onPrev={() => goToPage(currentPage(state) - 1)}
+            onNext={() => goToPage(currentPage(state) + 1)}
+            onJump={() => {
+              const n = Number(pageInput);
+              if (Number.isFinite(n)) goToPage(n - 1);
+            }}
+            onRun={runDetect}
+          />
+        </section>
+      )}
+
       <section style={{ marginTop: "1.5rem" }}>
-        {state.kind === "uploading" && <p>Detecting {state.fileName}…</p>}
-        {state.kind === "error" && (
-          <p style={{ color: "crimson" }}>Error: {state.message}</p>
+        {state.kind === "rendering" && (
+          <p>Rendering {state.fileName}, page {state.page + 1}…</p>
+        )}
+        {state.kind === "detecting" && (
+          <p>Running OCR on {state.fileName}, page {state.page + 1}…</p>
+        )}
+        {state.kind === "preview" && (
+          <ImageWithOverlay
+            imageUrl={state.imageUrl}
+            width={state.width}
+            height={state.height}
+            page={state.page}
+            pageCount={state.pageCount}
+            fileName={state.fileName}
+            detections={[]}
+            selectedId={null}
+            onSelect={() => {}}
+          />
         )}
         {state.kind === "detected" && (
           <DetectionLayout
@@ -180,8 +285,120 @@ export default function App() {
             onSelect={setSelectedId}
           />
         )}
+        {state.kind === "error" && (
+          <p style={{ color: "crimson" }}>Error: {state.message}</p>
+        )}
       </section>
     </main>
+  );
+}
+
+function currentPage(state: DetectState): number {
+  if (
+    state.kind === "rendering" ||
+    state.kind === "preview" ||
+    state.kind === "detecting" ||
+    state.kind === "detected"
+  ) {
+    return state.page;
+  }
+  return 0;
+}
+
+function activeContext(
+  state: DetectState,
+): { file: File; page: number; pageCount: number } | null {
+  if (state.kind === "preview" || state.kind === "detecting" || state.kind === "detected") {
+    return { file: state.file, page: state.page, pageCount: state.pageCount };
+  }
+  return null;
+}
+
+function Toolbar({
+  state,
+  pageInput,
+  onPageInputChange,
+  onPrev,
+  onNext,
+  onJump,
+  onRun,
+}: {
+  state: DetectState;
+  pageInput: string;
+  onPageInputChange: (s: string) => void;
+  onPrev: () => void;
+  onNext: () => void;
+  onJump: () => void;
+  onRun: () => void;
+}) {
+  const busy = state.kind === "rendering" || state.kind === "detecting";
+  const ctx = activeContext(state);
+  const page = currentPage(state);
+  const pageCount = ctx?.pageCount ?? null;
+  const canRun = (state.kind === "preview" || state.kind === "detected") && !busy;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.5rem",
+        flexWrap: "wrap",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onPrev}
+        disabled={busy || pageCount === null || page <= 0}
+      >
+        ← Prev
+      </button>
+      <button
+        type="button"
+        onClick={onNext}
+        disabled={
+          busy || pageCount === null || page >= pageCount - 1
+        }
+      >
+        Next →
+      </button>
+      <label style={{ fontSize: 14 }}>
+        Page{" "}
+        <input
+          type="number"
+          min={1}
+          max={pageCount ?? undefined}
+          value={pageInput}
+          onChange={(e) => onPageInputChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onJump();
+          }}
+          disabled={busy || pageCount === null}
+          style={{ width: 64 }}
+        />
+        {pageCount !== null && (
+          <span style={{ color: "#666" }}> of {pageCount}</span>
+        )}
+      </label>
+      <span style={{ flex: 1 }} />
+      <button
+        type="button"
+        onClick={onRun}
+        disabled={!canRun}
+        style={{
+          background: canRun ? "#2a6df4" : "#cbd5e1",
+          color: "#fff",
+          border: "none",
+          padding: "0.5rem 1rem",
+          borderRadius: 6,
+          fontWeight: 600,
+          cursor: canRun ? "pointer" : "not-allowed",
+        }}
+      >
+        {state.kind === "detected"
+          ? "Re-run OCR on this page"
+          : "Run OCR on this page"}
+      </button>
+    </div>
   );
 }
 
@@ -490,9 +707,11 @@ function CodeGroup({
 
 function lfCodeCompare(a: string, b: string): number {
   const parse = (s: string): number => {
-    const m = /^LF(\d{1,2}|7-X)$/.exec(s);
+    const m = /^LF(\d{1,2})(?:-(\d))?$/.exec(s);
     if (!m) return Number.POSITIVE_INFINITY;
-    return m[1] === "7-X" ? 7.5 : Number(m[1]);
+    const base = Number(m[1]);
+    const sub = m[2] !== undefined ? (Number(m[2]) + 1) / 100 : 0;
+    return base + sub;
   };
   return parse(a) - parse(b);
 }
