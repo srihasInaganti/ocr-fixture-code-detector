@@ -5,6 +5,7 @@ Single file for now; split into a package if/when a third provider lands.
 
 import io
 import os
+import re
 import struct
 from abc import ABC, abstractmethod
 
@@ -126,7 +127,9 @@ class DocumentAiProvider(OcrProvider):
             )
 
         if width <= _TILE_SIZE and height <= _TILE_SIZE:
-            return self._detect_image(image_bytes, offset_x=0, offset_y=0)
+            return _rejoin_lf7_subcodes(
+                self._detect_image(image_bytes, offset_x=0, offset_y=0)
+            )
 
         from PIL import Image
 
@@ -153,7 +156,7 @@ class DocumentAiProvider(OcrProvider):
                         continue
                     seen.add(key)
                     out.append(det)
-        return out
+        return _rejoin_lf7_subcodes(out)
 
     def _detect_image(
         self, image_bytes: bytes, *, offset_x: int, offset_y: int
@@ -212,6 +215,67 @@ def _normalized_poly_to_pixel_bbox(
     x_min, x_max = min(xs), max(xs)
     y_min, y_max = min(ys), max(ys)
     return [x_min, y_min, x_max - x_min, y_max - y_min]
+
+
+_LF7_TOKEN_RE = re.compile(r"^LF7$")
+_DASH_DIGIT_TOKEN_RE = re.compile(r"^-\d$")
+
+
+def _rejoin_lf7_subcodes(detections: list[Detection]) -> list[Detection]:
+    """Document AI often splits `LF7-3` into separate `LF7` and `-3` tokens.
+    Find LF7 + -digit pairs on the same line with a small horizontal gap
+    and emit a merged `LF7-N` detection so the regex in main.py accepts it.
+    """
+    pairings: dict[int, int] = {}
+    used_dashes: set[int] = set()
+    for i, det in enumerate(detections):
+        if not _LF7_TOKEN_RE.match(det.text):
+            continue
+        lx, ly, lw, lh = det.bbox
+        lf_cy = ly + lh / 2
+        best = -1
+        best_gap = float("inf")
+        for j, cand in enumerate(detections):
+            if j in used_dashes or not _DASH_DIGIT_TOKEN_RE.match(cand.text):
+                continue
+            cx, cy, cw, ch = cand.bbox
+            if cx < lx + lw * 0.5:
+                continue
+            gap = cx - (lx + lw)
+            if gap > lh:
+                continue
+            if abs((cy + ch / 2) - lf_cy) > lh * 0.6:
+                continue
+            if gap < best_gap:
+                best_gap = gap
+                best = j
+        if best >= 0:
+            pairings[i] = best
+            used_dashes.add(best)
+
+    if not pairings:
+        return detections
+
+    merged: list[Detection] = []
+    for i, det in enumerate(detections):
+        if i in used_dashes:
+            continue
+        if i in pairings:
+            cand = detections[pairings[i]]
+            lx, ly, lw, lh = det.bbox
+            cx, cy, cw, ch = cand.bbox
+            y0 = min(ly, cy)
+            y1 = max(ly + lh, cy + ch)
+            merged.append(
+                Detection(
+                    text=det.text + cand.text,
+                    bbox=[lx, y0, (cx + cw) - lx, y1 - y0],
+                    confidence=min(det.confidence, cand.confidence),
+                )
+            )
+        else:
+            merged.append(det)
+    return merged
 
 
 def _tile_starts(length: int, tile_size: int, overlap: int) -> list[int]:
