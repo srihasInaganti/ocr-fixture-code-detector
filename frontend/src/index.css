@@ -174,28 +174,6 @@ button:disabled {
 }
 .app-header h1 { font-size: 1.4rem; }
 
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-muted);
-}
-.badge.ok { color: var(--success); border-color: rgba(110, 208, 154, 0.35); }
-.badge.err { color: var(--danger); border-color: rgba(239, 106, 90, 0.35); }
-.badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.badge.loading .badge-dot { animation: pulse 1.4s ease-in-out infinite; }
-
 .section { margin-top: 1rem; }
 
 .dropzone {

@@ -7,11 +7,6 @@ type Detection = {
   confidence: number;
 };
 
-type HealthState =
-  | { kind: "loading" }
-  | { kind: "ok" }
-  | { kind: "error"; message: string };
-
 type DetectState =
   | { kind: "idle" }
   | {
@@ -58,7 +53,6 @@ type AppError = { message: string; retry?: () => void };
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
 export default function App() {
-  const [health, setHealth] = useState<HealthState>({ kind: "loading" });
   const [state, setState] = useState<DetectState>({ kind: "idle" });
   const [dragOver, setDragOver] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -69,28 +63,6 @@ export default function App() {
   const [error, setError] = useState<AppError | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const newBoxSeq = useRef(0);
-
-  useEffect(() => {
-    if (!API_BASE_URL) {
-      setHealth({ kind: "error", message: "VITE_API_BASE_URL is not set." });
-      return;
-    }
-    const controller = new AbortController();
-    fetch(`${API_BASE_URL}/health`, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await res.json();
-        setHealth({ kind: "ok" });
-      })
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        setHealth({
-          kind: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      });
-    return () => controller.abort();
-  }, []);
 
   async function renderPage(file: File, page: number, rot: number) {
     if (!API_BASE_URL) return;
@@ -361,7 +333,6 @@ export default function App() {
     <main className="app">
       <header className="app-header">
         <h1>OCR Fixture Code Detector</h1>
-        <HealthBadge state={health} />
       </header>
 
       <input
@@ -655,23 +626,6 @@ function Toolbar({
         )}
       </button>
     </div>
-  );
-}
-
-function HealthBadge({ state }: { state: HealthState }) {
-  const cls =
-    state.kind === "ok" ? "ok" : state.kind === "error" ? "err" : "loading";
-  const label =
-    state.kind === "ok"
-      ? "backend ok"
-      : state.kind === "error"
-        ? "backend down"
-        : "checking…";
-  return (
-    <span className={`badge ${cls}`} title={state.kind === "error" ? state.message : undefined}>
-      <span className="badge-dot" />
-      {label}
-    </span>
   );
 }
 
