@@ -26,5 +26,4 @@ CSV.
 - **Backend:** Python + FastAPI on [Render](https://render.com), with
   [PyMuPDF](https://pymupdf.readthedocs.io/) for PDF rendering.
 - **Frontend:** React + Vite + TypeScript on [Vercel](https://vercel.com).
-- **OCR:** pluggable provider interface — currently a stub for development;
-  Google Document AI / Azure Document Intelligence planned.
+- **OCR:** Google Document AI
